@@ -33,33 +33,34 @@ const (
 )
 
 type Driver struct {
-	Id                string
-	AccessKey         string
-	SecretKey         string
-	SessionToken      string
-	Region            string
-	AMI               string
-	SSHKeyID          int
-	KeyName           string
-	InstanceId        string
-	InstanceType      string
-	IPAddress         string
-	PrivateIPAddress  string
-	MachineName       string
-	SecurityGroupId   string
-	SecurityGroupName string
-	ReservationId     string
-	RootSize          int64
-	VpcId             string
-	SubnetId          string
-	Zone              string
-	CaCertPath        string
-	PrivateKeyPath    string
-	SwarmMaster       bool
-	SwarmHost         string
-	SwarmDiscovery    string
-	storePath         string
-	keyPath           string
+	Id                	string
+	AccessKey         	string
+	SecretKey         	string
+	SessionToken      	string
+	Region            	string
+	AMI               	string
+	SSHKeyID          	int
+	KeyName           	string
+	InstanceId        	string
+	InstanceType      	string
+	IPAddress         	string
+	PrivateIPAddress  	string
+	MachineName       	string
+	SecurityGroupId   	string
+	SecurityGroupName 	string
+	ReservationId     	string
+	RootSize          	int64
+	VpcId             	string
+	SubnetId          	string
+	Zone              	string
+	CaCertPath        	string
+	PrivateKeyPath    	string
+	SwarmMaster       	bool
+	SwarmHost         	string
+	SwarmDiscovery    	string
+	storePath         	string
+	keyPath           	string
+	UsePrivateIPAddress	bool
 }
 
 type CreateFlags struct {
@@ -146,6 +147,11 @@ func GetCreateFlags() []cli.Flag {
 			Value:  defaultRootSize,
 			EnvVar: "AWS_ROOT_SIZE",
 		},
+		cli.BoolFlag{
+			Name:	"amazonec2-use-private-ip-address",
+			Usage:	"Use AWS private IP Address instead of the public IP Address true/false",
+			EnvVar:	"AWS_USE_PRIVATE_IP_ADDRESS",
+		},
 	}
 }
 
@@ -180,7 +186,8 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.SwarmMaster = flags.Bool("swarm-master")
 	d.SwarmHost = flags.String("swarm-host")
 	d.SwarmDiscovery = flags.String("swarm-discovery")
-
+	d.UsePrivateIPAddress = flags.Bool("amazonec2-use-private-ip-address")
+	
 	if d.AccessKey == "" {
 		return fmt.Errorf("amazonec2 driver requires the --amazonec2-access-key option")
 	}
@@ -276,14 +283,23 @@ func (d *Driver) Create() error {
 		d.PrivateIPAddress = instance.NetworkInterfaceSet[0].PrivateIpAddress
 	}
 
+	if d.UsePrivateIPAddress {
+		d.IPAddress = d.PrivateIPAddress
+	}
+
 	d.waitForInstance()
+
+	if d.UsePrivateIPAddress {
+                d.IPAddress = d.PrivateIPAddress
+        }
+
 
 	log.Debugf("created instance ID %s, IP address %s, Private IP address %s",
 		d.InstanceId,
 		d.IPAddress,
 		d.PrivateIPAddress,
 	)
-
+	
 	log.Infof("Waiting for SSH on %s:%d", d.IPAddress, 22)
 
 	if err := ssh.WaitForTCP(fmt.Sprintf("%s:%d", d.IPAddress, 22)); err != nil {
@@ -331,6 +347,10 @@ func (d *Driver) GetIP() (string, error) {
 	inst, err := d.getInstance()
 	if err != nil {
 		return "", err
+	}
+	
+	if d.UsePrivateIPAddress {
+		return inst.PrivateIpAddress, nil
 	}
 
 	return inst.IpAddress, nil
@@ -441,7 +461,7 @@ func (d *Driver) GetDockerConfigDir() string {
 func (d *Driver) Upgrade() error {
 	log.Debugf("Upgrading Docker")
 
-	cmd, err := d.GetSSHCommand("sudo apt-get update && sudo apt-get install --upgrade lxc-docker")
+	cmd, err := d.GetSSHCommand("sudo apt-get update && sudo apt-get install --upgrade docker.io")
 	if err != nil {
 		return err
 
@@ -619,12 +639,23 @@ func (d *Driver) configureSecurityGroup(groupName string) error {
 
 		log.Debugf("authorizing swarm on port %d", port)
 
-		perms = append(perms, amz.IpPermission{
-			IpProtocol: "tcp",
-			FromPort:   port,
-			ToPort:     port,
-			IpRange:    ipRange,
-		})
+		hasPort := false
+
+        	for _, p := range securityGroup.IpPermissions {
+                	switch p.FromPort {
+			case port:
+                       		hasPort = true
+                	}
+        	}
+
+		if !hasPort {
+			perms = append(perms, amz.IpPermission{
+				IpProtocol: "tcp",
+				FromPort:   port,
+				ToPort:     port,
+				IpRange:    ipRange,
+			})
+		}
 	}
 
 	log.Debugf("configuring security group authorization for %s", ipRange)
@@ -643,6 +674,7 @@ func (d *Driver) configureSecurityGroup(groupName string) error {
 func configureSecurityGroupPermissions(group *amz.SecurityGroup) []amz.IpPermission {
 	hasSshPort := false
 	hasDockerPort := false
+
 	for _, p := range group.IpPermissions {
 		switch p.FromPort {
 		case 22:
